@@ -6,34 +6,37 @@ set -euo pipefail
 # TRIGEMINAL SYSTEM TRACTOGRAPHY - Nasrin Rafiei (2025-2026)
 #
 # SECOND-ORDER ENSEMBLE VERSION
-# TARGET-BUNDLE VERSION: only DTTT_Ipsilat_dPSN and VTTT_Controlat_OSandIS
-# SUBJECT-BY-SUBJECT VERSION:
-#   - no pooled all_left/all_right files
-#   - each subject uses its own first-order spinal / remaining_cp bundles
-#   - nothing is created outside the subject folder
-#   - subject-specific density maps are stored directly in mni_space/rois
+# SUBJECT-BY-SUBJECT VERSION
+# COMBO-WISE VERSION:
+#   - each step/theta combo is processed separately through filtering/cut/final_length
+#   - ONLY final length-filtered bundles are concatenated at the end
+#   - this avoids merging very large raw tractograms before filtering
 #
 # Organized pipeline:
 #   0) prepare subject-specific first-order density maps
 #   1) prepare second-order seed masks and thalamus ROIs
 #   2) run second-order tracking for each (step, theta) combo in ORIG
-#   3) merge combo outputs per tracking role in ORIG
-#   4) register merged tractograms once to MNI
-#   5) prepare second-order MNI ROIs and cut masks
-#   6) filter merged second-order tractograms into pathway bundles
-#   7) cut filtered bundles with label masks
-#   8) reject outliers and save final second-order bundles
-#   8.5) filter final second-order bundles by length
-#   9) bring final length-filtered MNI bundles back to ORIG
+#   3) prepare second-order MNI ROIs and cut masks
+#   4) process each tracking combo separately in MNI space
+#   5) concatenate only final length-filtered bundles across combos
+#   6) bring final concatenated MNI bundles back to ORIG
 
 usage() {
-    cat <<EOF 1>&2
+    cat <<USAGE 1>&2
 Usage:
   $(basename "$0") -s <subjects_parent_or_single_subject_dir> -m <ROIs_clean_dir> -o <out_dir>
                    [-f fa_threshold] [-t threads] [-g true|false]
                    [-p step_size] [-e theta_deg]
-                   [--npv_spinal_long N] [--npv_thalamus N]
-EOF
+                   [--npv_spinal_long N] [--npv_spinal_short N] [--npv_thalamus N]
+
+Example:
+  bash $(basename "$0") \
+    -s /home/local/USHERBROOKE/rafn2101/data/data_test_retest/SUBJECTS_PARENT \
+    -m /path/to/ROIs_clean_dir \
+    -o /home/local/USHERBROOKE/rafn2101/data/data_test_retest/final_box_spinal \
+    -f 0.15 -t 8 -g false \
+    --npv_spinal_long 3000 --npv_spinal_short 300 --npv_thalamus 1500
+USAGE
     exit 1
 }
 
@@ -67,9 +70,9 @@ shift $((OPTIND-1))
 # -------------------------
 # Parse optional long args
 # -------------------------
-npv_spinal_long_total=5000
-npv_spinal_short_total=500
-npv_thalamus_total=2500
+npv_spinal_long_total=3000
+npv_spinal_short_total=300
+npv_thalamus_total=1500
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -107,6 +110,13 @@ if [[ -n "${g}" && "${g}" == "true" ]]; then
     gpu="--use_gpu"
 fi
 
+# -------------------------
+# If you use --npv_thalamus 1500, files are named from_thalamus_npv1500.
+# -------------------------
+spinal_long_role="from_spinal_track_npv${npv_spinal_long_total}"
+spinal_short_role="from_spinal_track_npv${npv_spinal_short_total}"
+thalamus_role="from_thalamus_npv${npv_thalamus_total}"
+
 trk_is_empty() {
     local f="$1"
 
@@ -134,7 +144,6 @@ mask_has_nonzero_voxels() {
     local nz
     nz=$(python - <<PY
 import nibabel as nib
-import numpy as np
 img = nib.load(r"""${f}""")
 print(int((img.get_fdata() > 0).sum()))
 PY
@@ -149,11 +158,9 @@ get_label_ids_for_cut() {
     python - <<PY
 import nibabel as nib
 import numpy as np
-
 f = r"""${labels_file}"""
 vals = np.unique(nib.load(f).get_fdata())
 vals = [int(v) for v in vals if v != 0]
-
 if len(vals) < 2:
     print("")
 elif len(vals) == 2:
@@ -325,7 +332,6 @@ safe_filter_by_roi() {
     fi
 }
 
-
 safe_filter_by_length() {
     local in_trk="$1"
     local out_trk="$2"
@@ -355,6 +361,57 @@ safe_filter_by_length() {
     fi
 }
 
+safe_concatenate_incremental() {
+    local out_trk="$1"
+    shift
+
+    local files=("$@")
+
+    if (( ${#files[@]} == 0 )); then
+        echo "WARN: no files given to concatenate for ${out_trk}"
+        rm -f "${out_trk}"
+        return 0
+    fi
+
+    if (( ${#files[@]} == 1 )); then
+        cp -f "${files[0]}" "${out_trk}"
+        return 0
+    fi
+
+    local tmp_dir
+    tmp_dir="$(dirname "${out_trk}")/tmp_concat_$(basename "${out_trk}" .trk)"
+    mkdir -p "${tmp_dir}"
+
+    local tmp_merge="${tmp_dir}/merge_0.trk"
+    cp -f "${files[0]}" "${tmp_merge}"
+
+    local idx=1
+    local cf
+    for cf in "${files[@]:1}"; do
+        local next_tmp="${tmp_dir}/merge_${idx}.trk"
+
+        echo "  Concatenate ${idx}/${#files[@]} into $(basename "${out_trk}")"
+
+        scil_tractogram_math concatenate \
+            "${tmp_merge}" \
+            "${cf}" \
+            "${next_tmp}" \
+            -f
+
+        rm -f "${tmp_merge}"
+        tmp_merge="${next_tmp}"
+        idx=$((idx + 1))
+    done
+
+    mv -f "${tmp_merge}" "${out_trk}"
+    rm -rf "${tmp_dir}"
+
+    if trk_is_empty "${out_trk}"; then
+        echo "WARN: ${out_trk} is empty after final concatenation. Removing."
+        rm -f "${out_trk}"
+    fi
+}
+
 # -------------------------
 # Ensemble grid
 # -------------------------
@@ -369,6 +426,7 @@ fi
 n_combos=$(( ${#step_list[@]} * ${#theta_list[@]} ))
 
 npv_spinal_long_per_combo=$(( (npv_spinal_long_total + n_combos - 1) / n_combos ))
+npv_spinal_short_per_combo=$(( (npv_spinal_short_total + n_combos - 1) / n_combos ))
 npv_thalamus_per_combo=$(( (npv_thalamus_total + n_combos - 1) / n_combos ))
 
 echo "Folder subjects: ${subject_dir}"
@@ -380,7 +438,12 @@ echo "Threads: ${nb_threads}"
 echo "Tracking grid: steps=${step_list[*]}  thetas=${theta_list[*]}"
 echo "Second-order budgets per combo:"
 echo "  spinal long:  ${npv_spinal_long_per_combo}  (from total ${npv_spinal_long_total})"
+echo "  spinal short: ${npv_spinal_short_per_combo} (from total ${npv_spinal_short_total})"
 echo "  thalamus:     ${npv_thalamus_per_combo}     (from total ${npv_thalamus_total})"
+echo "Role names:"
+echo "  spinal long role:  ${spinal_long_role}"
+echo "  spinal short role: ${spinal_short_role}"
+echo "  thalamus role:     ${thalamus_role}"
 
 export ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS="${nb_threads}"
 
@@ -398,12 +461,12 @@ if [[ ${#subject_list[@]} -eq 0 ]]; then
 fi
 
 for nsub_path in "${subject_list[@]}"; do
-    nsub=$(basename "${nsub_path}")
+    nsub=$(basename "${nsub_path%/}")
 
     mkdir -p "${out_dir}/${nsub}/orig_space/rois"
-    mkdir -p "${out_dir}/${nsub}/orig_space/tracking_second_order"/{trials,merged,final}
+    mkdir -p "${out_dir}/${nsub}/orig_space/tracking_second_order"/{trials,final}
     mkdir -p "${out_dir}/${nsub}/mni_space/rois"
-    mkdir -p "${out_dir}/${nsub}/mni_space/tracking_second_order"/{orig,filtered,final,cut}
+    mkdir -p "${out_dir}/${nsub}/mni_space/tracking_second_order"/{combo_outputs,final_ensemble}
 
     orig_rois_dir="${out_dir}/${nsub}/orig_space/rois"
     mni_rois_dir="${out_dir}/${nsub}/mni_space/rois"
@@ -412,16 +475,15 @@ for nsub_path in "${subject_list[@]}"; do
     first_order_final_dir="${out_dir}/${nsub}/mni_space/tracking_first_order/final_merged/final"
 
     orig_trials_root="${orig_tracking_dir}/trials"
-    orig_merged_root="${orig_tracking_dir}/merged"
 
     echo ""
-    echo "|------------- PROCESSING SECOND-ORDER ENSEMBLE FOR ${nsub} -------------|"
+    echo "|------------- PROCESSING SECOND-ORDER COMBO-WISE ENSEMBLE FOR ${nsub} -------------|"
     echo ""
 
     for nside in left right; do
         if trk_is_empty "${first_order_final_dir}/${nsub}_${nside}_spinal.trk"; then
             echo "WARN: Missing or empty first-order spinal file: ${first_order_final_dir}/${nsub}_${nside}_spinal.trk"
-            echo "WARN: ${nside} spinal-based second-order tracking will be skipped."
+            echo "WARN: ${nside} spinal-based second-order tracking may be skipped."
         fi
 
         if trk_is_empty "${first_order_final_dir}/${nsub}_${nside}_remaining_cp.trk"; then
@@ -531,8 +593,18 @@ for nsub_path in "${subject_list[@]}"; do
                         "${nsub_path}/tractoflow/${nsub}__fodf.nii.gz" \
                         "${spinal_seed}" \
                         "${wm_mask}" \
-                        "${orig_trials_root}/${combo_tag}/${nsub}_${nside}_from_spinal_track_npv3000_${combo_tag}.trk" \
+                        "${orig_trials_root}/${combo_tag}/${nsub}_${nside}_${spinal_long_role}_${combo_tag}.trk" \
                         --npv "${npv_spinal_long_per_combo}" \
+                        --step "${step_size}" \
+                        --theta "${theta}" \
+                        ${gpu} -v -f
+
+                    scil_tracking_local \
+                        "${nsub_path}/tractoflow/${nsub}__fodf.nii.gz" \
+                        "${spinal_seed}" \
+                        "${wm_mask}" \
+                        "${orig_trials_root}/${combo_tag}/${nsub}_${nside}_${spinal_short_role}_${combo_tag}.trk" \
+                        --npv "${npv_spinal_short_per_combo}" \
                         --step "${step_size}" \
                         --theta "${theta}" \
                         ${gpu} -v -f
@@ -545,7 +617,7 @@ for nsub_path in "${subject_list[@]}"; do
                         "${nsub_path}/tractoflow/${nsub}__fodf.nii.gz" \
                         "${thalamus_seed}" \
                         "${wm_mask}" \
-                        "${orig_trials_root}/${combo_tag}/${nsub}_${nside}_from_thalamus_npv600_${combo_tag}.trk" \
+                        "${orig_trials_root}/${combo_tag}/${nsub}_${nside}_${thalamus_role}_${combo_tag}.trk" \
                         --npv "${npv_thalamus_per_combo}" \
                         --step "${step_size}" \
                         --theta "${theta}" \
@@ -559,7 +631,6 @@ for nsub_path in "${subject_list[@]}"; do
 
     # -------------------------
     # 3) Prepare second-order MNI ROIs and cut masks
-    #    NOTE: We do this before combo-wise filtering.
     # -------------------------
     echo "|------------- 3) Prepare second-order MNI ROIs and cut masks -------------|"
     echo "|------------- 3.1) Copy VPM and pathway-specific MNI ROIs -------------|"
@@ -616,20 +687,31 @@ for nsub_path in "${subject_list[@]}"; do
 
     # -------------------------
     # 4) Process each combo separately
-    #    This replaces the old heavy raw merge step.
-    #    For every combo:
-    #      - register raw combo tractograms to MNI
-    #      - filter pathway bundles
-    #      - cut
-    #      - reject outliers
-    #      - length filter
     # -------------------------
     echo "|------------- 4) Process each combo separately before final concatenation -------------|"
+
+    declare -A minL_by_bundle
+    declare -A maxL_by_bundle
+
+    minL_by_bundle["DTTT_Ipsilat_CS"]=0
+    maxL_by_bundle["DTTT_Ipsilat_CS"]=100
+
+    minL_by_bundle["DTTT_Ipsilat_dPSN"]=0
+    maxL_by_bundle["DTTT_Ipsilat_dPSN"]=90
+
+    minL_by_bundle["DTTT_Controlat_CS"]=0
+    maxL_by_bundle["DTTT_Controlat_CS"]=165
+
+    minL_by_bundle["VTTT_Controlat_OSandIS"]=0
+    maxL_by_bundle["VTTT_Controlat_OSandIS"]=185
+
+    minL_by_bundle["VTTT_Controlat_vPSN"]=0
+    maxL_by_bundle["VTTT_Controlat_vPSN"]=107
 
     for step_size in "${step_list[@]}"; do
         for theta in "${theta_list[@]}"; do
             combo_tag="step_${step_size}_theta_${theta}"
-            combo_mni_dir="${mni_tracking_dir_second_order}/combo_${combo_tag}"
+            combo_mni_dir="${mni_tracking_dir_second_order}/combo_outputs/${combo_tag}"
 
             mkdir -p "${combo_mni_dir}"/{orig,filtered,cut,final,final_length}
 
@@ -642,7 +724,7 @@ for nsub_path in "${subject_list[@]}"; do
             # -------------------------
             echo "|------------- 4.1) Register combo ${combo_tag} tractograms to MNI -------------|"
             for nside in left right; do
-                for role in from_thalamus_npv1500 from_spinal_track_npv300 from_spinal_track_npv3000; do
+                for role in "${thalamus_role}" "${spinal_short_role}" "${spinal_long_role}"; do
                     in_trk="${orig_trials_root}/${combo_tag}/${nsub}_${nside}_${role}_${combo_tag}.trk"
                     out_trk="${combo_mni_dir}/orig/${nsub}_${nside}_${role}_${combo_tag}.trk"
 
@@ -669,7 +751,7 @@ for nsub_path in "${subject_list[@]}"; do
             done
 
             # -------------------------
-            # 4.2) Filter this combo into pathway bundles
+            # 4.2) Filter this combo's tractograms into pathway bundles
             # -------------------------
             echo "|------------- 4.2) Filter combo ${combo_tag} into pathway bundles -------------|"
             for nside in left right; do
@@ -679,10 +761,9 @@ for nsub_path in "${subject_list[@]}"; do
                     contra_nside="left"
                 fi
 
-                echo "|------------- Combo ${combo_tag}: from ${nside} - VTTT Controlat OS/IS and vPSN -------------|"
-
+                echo "|------------- 4.2.1) Combo ${combo_tag}: from ${nside} - VTTT contralateral OS/IS -------------|"
                 safe_filter_by_roi \
-                    "${combo_mni_dir}/orig/${nsub}_${contra_nside}_from_thalamus_npv1500_${combo_tag}.trk" \
+                    "${combo_mni_dir}/orig/${nsub}_${contra_nside}_${thalamus_role}_${combo_tag}.trk" \
                     "${combo_mni_dir}/filtered/${nsub}_from_${nside}_VTTT_Controlat_OSandIS_${combo_tag}.trk" \
                     --drawn_roi "${mni_rois_dir}/${nsub}_left_cerebellum_wm_mni.nii.gz" 'any' 'exclude' \
                     --drawn_roi "${mni_rois_dir}/${nsub}_right_cerebellum_wm_mni.nii.gz" 'any' 'exclude' \
@@ -698,8 +779,9 @@ for nsub_path in "${subject_list[@]}"; do
                     --bdo "${mni_dir}/MNI/from_${nside}/new_ROIs/VTTT_Controlat_OSandIS_1.bdo" 'any' 'exclude' \
                     --bdo "${mni_dir}/MNI/from_${nside}/new_ROIs/VTTT_Controlat_OSandIS_2.bdo" 'any' 'exclude'
 
+                echo "|------------- 4.2.2) Combo ${combo_tag}: from ${nside} - VTTT contralateral vPSN -------------|"
                 safe_filter_by_roi \
-                    "${combo_mni_dir}/orig/${nsub}_${nside}_from_spinal_track_npv3000_${combo_tag}.trk" \
+                    "${combo_mni_dir}/orig/${nsub}_${nside}_${spinal_long_role}_${combo_tag}.trk" \
                     "${combo_mni_dir}/filtered/${nsub}_from_${nside}_VTTT_Controlat_vPSN_${combo_tag}.trk" \
                     --drawn_roi "${mni_rois_dir}/${nsub}_left_cerebellum_wm_mni.nii.gz" 'any' 'exclude' \
                     --drawn_roi "${mni_rois_dir}/${nsub}_right_cerebellum_wm_mni.nii.gz" 'any' 'exclude' \
@@ -715,9 +797,9 @@ for nsub_path in "${subject_list[@]}"; do
                     --bdo "${mni_dir}/MNI/from_${nside}/VTTT_Controlat/VTTT_Controlat_vPSN_5.bdo" 'any' 'exclude' \
                     --bdo "${mni_dir}/MNI/from_${nside}/VTTT_Controlat/VTTT_Controlat_vPSN_6.bdo" 'any' 'exclude'
 
-                echo "|------------- Combo ${combo_tag}: ${nside} - DTTT Controlat CS -------------|"
+                echo "|------------- 4.2.3) Combo ${combo_tag}: ${nside} - DTTT contralateral CS -------------|"
                 safe_filter_by_roi \
-                    "${combo_mni_dir}/orig/${nsub}_${nside}_from_thalamus_npv1500_${combo_tag}.trk" \
+                    "${combo_mni_dir}/orig/${nsub}_${nside}_${thalamus_role}_${combo_tag}.trk" \
                     "${combo_mni_dir}/filtered/${nsub}_from_${contra_nside}_DTTT_Controlat_CS_${combo_tag}.trk" \
                     --drawn_roi "${mni_rois_dir}/${nsub}_${contra_nside}_spinal_density_second_order_seed_mni.nii.gz" 'any' 'include' \
                     --drawn_roi "${mni_rois_dir}/${nsub}_${nside}_thalamus_mni.nii.gz" 'any' 'include' \
@@ -730,9 +812,9 @@ for nsub_path in "${subject_list[@]}"; do
                     --bdo "${mni_dir}/MNI/from_${nside}/new_ROIs/DTTT_Controlat_3.bdo" 'any' 'exclude' \
                     --bdo "${mni_dir}/MNI/from_${nside}/new_ROIs/DTTT_Controlat_4.bdo" 'any' 'exclude'
 
-                echo "|------------- Combo ${combo_tag}: ${nside} - DTTT Ipsilat dPSN and CS -------------|"
+                echo "|------------- 4.2.4) Combo ${combo_tag}: ${nside} - DTTT ipsilateral CS -------------|"
                 safe_filter_by_roi \
-                    "${combo_mni_dir}/orig/${nsub}_${nside}_from_spinal_track_npv300_${combo_tag}.trk" \
+                    "${combo_mni_dir}/orig/${nsub}_${nside}_${spinal_short_role}_${combo_tag}.trk" \
                     "${combo_mni_dir}/filtered/${nsub}_from_${nside}_DTTT_Ipsilat_CS_${combo_tag}.trk" \
                     --drawn_roi "${mni_rois_dir}/${nsub}_${nside}_spinal_density_second_order_seed_mni.nii.gz" 'either_end' 'include' \
                     --drawn_roi "${mni_rois_dir}/${nsub}_${nside}_VPM_mni.nii.gz" 'any' 'include' \
@@ -742,8 +824,9 @@ for nsub_path in "${subject_list[@]}"; do
                     --bdo "${mni_dir}/MNI/from_${nside}/new_ROIs/DTTT_Ipsilat_CS_2.bdo" 'any' 'exclude' \
                     --bdo "${mni_dir}/MNI/from_${nside}/new_ROIs/DTTT_Ipsilat_CS_3.bdo" 'any' 'exclude'
 
+                echo "|------------- 4.2.5) Combo ${combo_tag}: ${nside} - DTTT ipsilateral dPSN -------------|"
                 safe_filter_by_roi \
-                    "${combo_mni_dir}/orig/${nsub}_${nside}_from_spinal_track_npv3000_${combo_tag}.trk" \
+                    "${combo_mni_dir}/orig/${nsub}_${nside}_${spinal_long_role}_${combo_tag}.trk" \
                     "${combo_mni_dir}/filtered/${nsub}_from_${nside}_DTTT_Ipsilat_dPSN_${combo_tag}.trk" \
                     --drawn_roi "${mni_rois_dir}/${nsub}_${nside}_VPM_mni.nii.gz" 'any' 'include' \
                     --drawn_roi "${mni_rois_dir}/${nsub}_${nside}_remaining_cp_density_mni.nii.gz" 'either_end' 'include' \
@@ -851,25 +934,6 @@ for nsub_path in "${subject_list[@]}"; do
             # 4.5) Filter final combo bundles by length
             # -------------------------
             echo "|------------- 4.5) Length-filter final combo ${combo_tag} bundles -------------|"
-
-            declare -A minL_by_bundle
-            declare -A maxL_by_bundle
-
-            minL_by_bundle["DTTT_Ipsilat_CS"]=0
-            maxL_by_bundle["DTTT_Ipsilat_CS"]=100
-
-            minL_by_bundle["DTTT_Ipsilat_dPSN"]=0
-            maxL_by_bundle["DTTT_Ipsilat_dPSN"]=90
-
-            minL_by_bundle["DTTT_Controlat_CS"]=0
-            maxL_by_bundle["DTTT_Controlat_CS"]=165
-
-            minL_by_bundle["VTTT_Controlat_OSandIS"]=0
-            maxL_by_bundle["VTTT_Controlat_OSandIS"]=185
-
-            minL_by_bundle["VTTT_Controlat_vPSN"]=0
-            maxL_by_bundle["VTTT_Controlat_vPSN"]=107
-
             for nside in left right; do
                 for nbundle in \
                     DTTT_Ipsilat_CS \
@@ -896,7 +960,6 @@ for nsub_path in "${subject_list[@]}"; do
 
     # -------------------------
     # 5) Final concatenate across combos
-    #    Now we concatenate small final_length bundles, not huge raw tractograms.
     # -------------------------
     echo "|------------- 5) Final concatenate across combos -------------|"
 
@@ -911,13 +974,11 @@ for nsub_path in "${subject_list[@]}"; do
             VTTT_Controlat_vPSN; do
 
             files=()
-            concat_dir="${mni_tracking_dir_second_order}/final_ensemble/tmp_${nside}_${nbundle}"
-            mkdir -p "${concat_dir}"
 
             for step_size in "${step_list[@]}"; do
                 for theta in "${theta_list[@]}"; do
                     combo_tag="step_${step_size}_theta_${theta}"
-                    combo_mni_dir="${mni_tracking_dir_second_order}/combo_${combo_tag}"
+                    combo_mni_dir="${mni_tracking_dir_second_order}/combo_outputs/${combo_tag}"
                     f="${combo_mni_dir}/final_length/${nsub}_from_${nside}_${nbundle}_${combo_tag}.trk"
 
                     if ! trk_is_empty "${f}"; then
@@ -934,33 +995,8 @@ for nsub_path in "${subject_list[@]}"; do
                 continue
             fi
 
-            echo "Concatenating ${#files[@]} combo-final files for ${nside} ${nbundle}"
-
-            if (( ${#files[@]} == 1 )); then
-                cp -f "${files[0]}" "${out_trk}"
-            else
-                tmp_merge="${concat_dir}/tmp_${nsub}_${nside}_${nbundle}_merge_0.trk"
-                cp -f "${files[0]}" "${tmp_merge}"
-
-                idx=1
-                for cf in "${files[@]:1}"; do
-                    next_tmp="${concat_dir}/tmp_${nsub}_${nside}_${nbundle}_merge_${idx}.trk"
-                    echo "  Final concat ${idx}/${#files[@]} for ${nside} ${nbundle}"
-
-                    scil_tractogram_math concatenate \
-                        "${tmp_merge}" \
-                        "${cf}" \
-                        "${next_tmp}" \
-                        -f
-
-                    rm -f "${tmp_merge}"
-                    tmp_merge="${next_tmp}"
-                    idx=$((idx + 1))
-                done
-
-                mv -f "${tmp_merge}" "${out_trk}"
-            fi
-
+            echo "Final concatenation: ${#files[@]} combo-final files for ${nside} ${nbundle}"
+            safe_concatenate_incremental "${out_trk}" "${files[@]}"
             scil_tractogram_count_streamlines "${out_trk}" || true
         done
     done
@@ -991,6 +1027,11 @@ for nsub_path in "${subject_list[@]}"; do
                 --inverse \
                 --in_deformation "${out_dir}/${nsub}/orig_space/transfo/2orig_1InverseWarp.nii.gz" \
                 --remove_invalid -f
+
+            if trk_is_empty "${out_trk}"; then
+                echo "WARN: ${out_trk} is empty after back-to-orig transform. Removing."
+                rm -f "${out_trk}"
+            fi
         done
     done
 
@@ -999,4 +1040,4 @@ for nsub_path in "${subject_list[@]}"; do
 done
 
 # This version avoids the old heavy raw-tractogram merge.
-# It processes each step/theta combo separately and concatenates only final filtered bundles.
+# It processes each step/theta combo separately and concatenates only final filtered bundles..
