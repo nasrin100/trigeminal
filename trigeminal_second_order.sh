@@ -697,16 +697,16 @@ for nsub_path in "${subject_list[@]}"; do
     maxL_by_bundle["DTTT_Ipsilat_CS"]=100
 
     minL_by_bundle["DTTT_Ipsilat_dPSN"]=0
-    maxL_by_bundle["DTTT_Ipsilat_dPSN"]=90
+    maxL_by_bundle["DTTT_Ipsilat_dPSN"]=100
 
     minL_by_bundle["DTTT_Controlat_CS"]=0
-    maxL_by_bundle["DTTT_Controlat_CS"]=165
+    maxL_by_bundle["DTTT_Controlat_CS"]=170
 
     minL_by_bundle["VTTT_Controlat_OSandIS"]=0
     maxL_by_bundle["VTTT_Controlat_OSandIS"]=185
 
     minL_by_bundle["VTTT_Controlat_vPSN"]=0
-    maxL_by_bundle["VTTT_Controlat_vPSN"]=90
+    maxL_by_bundle["VTTT_Controlat_vPSN"]=100
 
     for step_size in "${step_list[@]}"; do
         for theta in "${theta_list[@]}"; do
