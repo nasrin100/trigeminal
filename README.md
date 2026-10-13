@@ -40,8 +40,31 @@ trigeminal_first_order.sh \
     -t 10 \ # Number of threads
     -g true # Use GPU
 ```
+## Results / Visualization
 
+The following figures show the first-order trigeminal probabilistic templates in different anatomical views.
+
+### Axial view
+![Axial view](documentations/axial.jpg)
+
+### Coronal view
+![Coronal view](documentations/coronal.png)
+
+### Sagittal view
+![Sagittal view](documentations/sagittal.png)
 ### Second order
+
+### Bundle visualizations
+
+![Bundle legend](documentations/Picture1.png)
+
+![Bundle visualization](documentations/Picture2.png)
+
+![Bundle visualization](documentations/Picture3.png)
+
+### 3D rendering
+
+![3D trigeminal bundle rendering](documentations/Screenshot_from_2026-10-09_14-14-52-removebg-preview.png)
 ```
 trigeminal_second_order.sh \
     -s path/to/input \
