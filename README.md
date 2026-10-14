@@ -110,17 +110,27 @@ npv_first_order  = 20000
 For HCP data, an FA threshold of 0.20 can be used. For clinical data, a lower threshold such as 0.15 may be more appropriate because of reduced anisotropy.
 
 ## First-order trigeminal pathways
+## Results / Visualization
 
-The following figure illustrates the reconstructed first-order trigeminal pathways and their anatomical organization.
+The following figures illustrate the first-order trigeminal probabilistic templates and reconstructed pathways.
 
-![First-order trigeminal pathways](documentations/first_order_bundle_views.png)
-### 3D rendering
+### Axial view
+![Axial view](documentations/axial.jpg)
 
-![3D trigeminal bundle rendering](documentations/trigeminal_3D_rendering.png)
+### Coronal view
+![Coronal view](documentations/coronal.png)
+
+### Sagittal view
+![Sagittal view](documentations/sagittal.png)
+
+
+### Bundle visualizations
+
+![Bundle visualization](documentations/first_order_bundle_views.png)
+
 ## Second-order tractography
 
 The second-order script should be run after the first-order script. It uses the first-order final bundles to generate seeding masks and reconstruct second-order trigeminal pathways.
-
 The script reconstructs pathways related to:
 
 - DTTT ipsilateral CS
