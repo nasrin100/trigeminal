@@ -126,7 +126,7 @@ The following figures illustrate the first-order trigeminal probabilistic templa
 
 ### Bundle visualizations
 
-![Bundle visualization](documentations/first_order_bundle_views.png)
+![Bundle visualization](documentations/trigeminal_3D_rendering.png)
 
 ## Second-order tractography
 
